@@ -20,7 +20,28 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install Android tools
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "cmake;3.22.1" "ndk;27.2.12479018"
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "cmake;4.3.2" "ndk;29.0.14206865"
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgJsonGlob: vcpkg.json
+
+      - name: Check vcpkg triplets
+        run: |
+          $VCPKG_ROOT/vcpkg help triplet | head -50
+          ls "$VCPKG_ROOT/triplets" | grep android
+      - name: Build dependencies
+        run: |
+          ABI=armeabi-v7a
+          cmake -B build-android-$ABI \
+            -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake \
+            -DVCPKG_TARGET_TRIPLET=arm-android \
+            -DVCPKG_CMAKE_SYSTEM_VERSION=24 \
+            -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=$ABI \
+            -DANDROID_PLATFORM=android-24 \
+            -DCMAKE_BUILD_TYPE=Release
 
       - name: Build APK
         working-directory: android
