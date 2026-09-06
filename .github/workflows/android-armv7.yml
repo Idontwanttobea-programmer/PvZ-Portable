@@ -8,48 +8,95 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Set up Java
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
-      - name: Set up Android SDK
+      - name: Setup Android
         uses: android-actions/setup-android@v3
 
       - name: Install Android tools
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "cmake;4.3.2" "ndk;29.0.14206865"
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "cmake;3.22.1" "ndk;27.0.12077973"
+
+      - name: Set Android environment
+        run: |
+          echo "ANDROID_NDK=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "ANDROID_API=24" >> "$GITHUB_ENV"
+
+      - name: Download SDL2 Source
+        run: |
+          SDL2_TAG="2.32.10"
+          wget -q "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_TAG}/SDL2-${SDL2_TAG}.tar.gz"
+          tar xf "SDL2-${SDL2_TAG}.tar.gz"
+          mv "SDL2-${SDL2_TAG}" sdl2-src
 
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
           vcpkgJsonGlob: vcpkg.json
 
-      - name: Check vcpkg triplets
+      - name: Build SDL2 Shared Library
         run: |
-          $VCPKG_ROOT/vcpkg help triplet | head -50
-          ls "$VCPKG_ROOT/triplets" | grep android
-      - name: Build dependencies
+          cmake -B build-sdl2 \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=armeabi-v7a \
+            -DANDROID_PLATFORM=android-$ANDROID_API \
+            -DSDL_SHARED=ON \
+            -DSDL_STATIC=OFF \
+            -DCMAKE_INSTALL_PREFIX=$GITHUB_WORKSPACE/sdl2-android \
+            -DCMAKE_BUILD_TYPE=Release \
+            sdl2-src
+
+          cmake --build build-sdl2 -j$(nproc)
+          cmake --install build-sdl2
+
+      - name: Build Native Library
         run: |
           ABI=armeabi-v7a
-          cmake -B build-android-$ABI \
+          BUILD_DIR=build-android-$ABI
+          SDL2_PREFIX=$GITHUB_WORKSPACE/sdl2-android
+
+          cmake -B $BUILD_DIR \
             -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake \
             -DVCPKG_TARGET_TRIPLET=arm-android \
-            -DVCPKG_CMAKE_SYSTEM_VERSION=24 \
+            -DVCPKG_CMAKE_SYSTEM_VERSION=$ANDROID_API \
             -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=$ABI \
-            -DANDROID_PLATFORM=android-24 \
+            -DANDROID_PLATFORM=android-$ANDROID_API \
+            -DSDL2_DIR=$SDL2_PREFIX/lib/cmake/SDL2 \
             -DCMAKE_BUILD_TYPE=Release
+
+          cmake --build $BUILD_DIR -j$(nproc)
+
+          JNILIBS=android/app/src/main/jniLibs/$ABI
+          mkdir -p $JNILIBS
+
+          cp -L $BUILD_DIR/libmain.so $JNILIBS/
+          cp -L $SDL2_PREFIX/lib/libSDL2*.so $JNILIBS/
+
+          VCPKG_LIB=$BUILD_DIR/vcpkg_installed/arm-android/lib
+          for so in "$VCPKG_LIB"/*.so; do
+            [ -f "$so" ] && cp -L "$so" $JNILIBS/
+          done
+
+          STRIP=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
+          for so in "$JNILIBS"/*.so; do
+            "$STRIP" --strip-unneeded "$so"
+          done
 
       - name: Build APK
         working-directory: android
         run: |
           sed -i "s/abiFilters 'arm64-v8a'/abiFilters 'armeabi-v7a'/" app/build.gradle
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-          gradle wrapper
-          ./gradlew assembleRelease --no-daemon
+          ./gradlew assembleRelease -PusePrebuiltLibs=true --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
